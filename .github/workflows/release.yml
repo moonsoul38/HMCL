@@ -1,136 +1,163 @@
-name: Create Release
+name: Build & Release
 
 on:
   workflow_dispatch:
-#  schedule:
-#    - cron: '30 * * * *'
+    inputs:
+      release:
+        description: "构建完成后创建 GitHub Release（取消勾选则只上传 Actions Artifact）"
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
 
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  check-update:
-    if: ${{ github.repository_owner == 'moonsoul38' }}
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - channel: dev
-            task: checkUpdateDev
-          - channel: stable
-            task: checkUpdateStable
+  build:
+    name: Build
     runs-on: ubuntu-latest
-    name: check-update-${{ matrix.channel }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-      - name: Set up JDK
-        uses: actions/setup-java@v5
-        with:
-          distribution: 'temurin'
-          java-version: '25'
-      - name: Fetch last version
-        run: ./gradlew ${{ matrix.task }} --no-daemon --info --stacktrace
-      - name: Check for existing tags
-        run: if [ -z "$(git tag -l "$HMCL_TAG_NAME")" ]; then echo "continue=true" >> $GITHUB_ENV; fi
-      - name: Download artifacts
-        if: ${{ env.continue == 'true' }}
-        run: |
-          wget "$HMCL_CI_DOWNLOAD_BASE_URI/HMCL-$HMCL_VERSION.exe"
-          wget "$HMCL_CI_DOWNLOAD_BASE_URI/HMCL-$HMCL_VERSION.exe.sha256"
-          wget "$HMCL_CI_DOWNLOAD_BASE_URI/HMCL-$HMCL_VERSION.jar"
-          wget "$HMCL_CI_DOWNLOAD_BASE_URI/HMCL-$HMCL_VERSION.jar.sha256"
-          wget "$HMCL_CI_DOWNLOAD_BASE_URI/HMCL-$HMCL_VERSION.sh"
-          wget "$HMCL_CI_DOWNLOAD_BASE_URI/HMCL-$HMCL_VERSION.sh.sha256"
-          wget "$HMCL_CI_DOWNLOAD_BASE_URI/HMCL-$HMCL_VERSION.deb"
-          wget "$HMCL_CI_DOWNLOAD_BASE_URI/HMCL-$HMCL_VERSION.deb.sha256"
-      - name: Verify artifacts
-        if: ${{ env.continue == 'true' }}
-        run: |
-          export JAR_SHA256=$(cat HMCL-$HMCL_VERSION.jar.sha256 | tr -d '\n')
-          export EXE_SHA256=$(cat HMCL-$HMCL_VERSION.exe.sha256 | tr -d '\n')
-          export SH_SHA256=$(cat HMCL-$HMCL_VERSION.sh.sha256 | tr -d '\n')
-          export DEB_SHA256=$(cat HMCL-$HMCL_VERSION.deb.sha256 | tr -d '\n')
-          
-          echo "$JAR_SHA256  HMCL-$HMCL_VERSION.jar" | sha256sum -c
-          echo "$EXE_SHA256  HMCL-$HMCL_VERSION.exe" | sha256sum -c
-          echo "$SH_SHA256  HMCL-$HMCL_VERSION.sh" | sha256sum -c
-          echo "$DEB_SHA256  HMCL-$HMCL_VERSION.deb" | sha256sum -c
-      - name: Generate release note
-        if: ${{ env.continue == 'true' }}
-        run: |
-          # GitHub Release Note
-          echo "&nbsp;**[Changelog](https://docs.hmcl.net/changelog/${{ matrix.channel }}.html#HMCL-$HMCL_VERSION)** (Chinese)" >> RELEASE_NOTE
-          echo "" >> RELEASE_NOTE
-          echo "| File | SHA-256 Checksum |"  >> RELEASE_NOTE
-          echo "| ---  | --- |" >> RELEASE_NOTE
-          echo "| [HMCL-$HMCL_VERSION.exe]($GH_DOWNLOAD_BASE_URL/v$HMCL_VERSION/HMCL-$HMCL_VERSION.exe) | \`$(cat HMCL-$HMCL_VERSION.exe.sha256)\` |" >> RELEASE_NOTE
-          echo "| [HMCL-$HMCL_VERSION.jar]($GH_DOWNLOAD_BASE_URL/v$HMCL_VERSION/HMCL-$HMCL_VERSION.jar) | \`$(cat HMCL-$HMCL_VERSION.jar.sha256)\` |" >> RELEASE_NOTE
-          echo "| [HMCL-$HMCL_VERSION.sh]($GH_DOWNLOAD_BASE_URL/v$HMCL_VERSION/HMCL-$HMCL_VERSION.sh)   | \`$(cat HMCL-$HMCL_VERSION.sh.sha256)\` |"  >> RELEASE_NOTE
-          echo "| [HMCL-$HMCL_VERSION.deb]($GH_DOWNLOAD_BASE_URL/v$HMCL_VERSION/HMCL-$HMCL_VERSION.deb) | \`$(cat HMCL-$HMCL_VERSION.deb.sha256)\` |"  >> RELEASE_NOTE
-          
-          # CNB Release Note
-          echo "[更新日志](https://docs.hmcl.net/changelog/${{ matrix.channel }}.html#HMCL-$HMCL_VERSION)" >> CNB_RELEASE_NOTE
-          echo "" >> CNB_RELEASE_NOTE
-          echo "| 文件 | SHA-256 校验码 |"  >> CNB_RELEASE_NOTE
-          echo "| :---  | --- |" >> CNB_RELEASE_NOTE
-          echo "| [HMCL-$HMCL_VERSION.exe]($CNB_DOWNLOAD_BASE_URL/v$HMCL_VERSION/HMCL-$HMCL_VERSION.exe) | \`$(cat HMCL-$HMCL_VERSION.exe.sha256)\` |" >> CNB_RELEASE_NOTE
-          echo "| [HMCL-$HMCL_VERSION.jar]($CNB_DOWNLOAD_BASE_URL/v$HMCL_VERSION/HMCL-$HMCL_VERSION.jar) | \`$(cat HMCL-$HMCL_VERSION.jar.sha256)\` |" >> CNB_RELEASE_NOTE
-          echo "| [HMCL-$HMCL_VERSION.sh]($CNB_DOWNLOAD_BASE_URL/v$HMCL_VERSION/HMCL-$HMCL_VERSION.sh)   | \`$(cat HMCL-$HMCL_VERSION.sh.sha256)\` |"  >> CNB_RELEASE_NOTE
-          echo "| [HMCL-$HMCL_VERSION.deb]($CNB_DOWNLOAD_BASE_URL/v$HMCL_VERSION/HMCL-$HMCL_VERSION.deb) | \`$(cat HMCL-$HMCL_VERSION.deb.sha256)\` |"  >> CNB_RELEASE_NOTE
 
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: "liberica"
+          java-version: "17"
+          java-package: "jdk+fx"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-cleanup: never
+
+      - name: Build with Gradle
+        run: xvfb-run --auto-servernum ./gradlew clean build --no-daemon --parallel --stacktrace
         env:
-          GH_DOWNLOAD_BASE_URL: https://github.com/${{ github.repository }}/releases/download
-          CNB_DOWNLOAD_BASE_URL: https://cnb.cool/HMCL-dev/HMCL/-/releases/download
-      - name: Create GitHub release
-        if: ${{ env.continue == 'true' }}
+          JAVA_TOOL_OPTIONS: -Djava.awt.headless=true
+          MICROSOFT_AUTH_ID: ${{ secrets.MICROSOFT_AUTH_ID }}
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+
+      - name: Resolve version
+        id: version
         run: |
-          gh release create "${{ env.HMCL_TAG_NAME }}" \
-            "HMCL-${{ env.HMCL_VERSION }}.exe" \
-            "HMCL-${{ env.HMCL_VERSION }}.jar" \
-            "HMCL-${{ env.HMCL_VERSION }}.sh" \
-            "HMCL-${{ env.HMCL_VERSION }}.deb" \
-            --target "${{ env.HMCL_COMMIT_SHA }}" \
-            --title "${{ env.HMCL_TAG_NAME }}" \
-            --notes-file RELEASE_NOTE \
-            --prerelease
+          set -euo pipefail
+
+          jar="$(find HMCL/build/libs -maxdepth 1 -name 'HMCL-*.jar' ! -name '*-sources.jar' -print -quit)"
+          if [ -z "$jar" ]; then
+            echo "::error::No HMCL jar found in HMCL/build/libs"
+            exit 1
+          fi
+
+          version="$(basename "$jar" .jar)"
+          version="${version#HMCL-}"
+
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="v${version}"
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          echo "Built version: ${version}"
+          ls -lh HMCL/build/libs/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: HMCL-${{ steps.version.outputs.version }}
+          path: HMCL/build/libs/HMCL-*
+          if-no-files-found: error
+          archive: false
+
+      - name: Generate release note
+        if: ${{ github.event_name == 'push' || inputs.release }}
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.version.outputs.version }}"
+          dir="HMCL/build/libs"
+
+          sha256() {
+            awk '{print $1}' "${dir}/HMCL-${version}.$1.sha256"
+          }
+
+          {
+            echo "> [!WARNING]"
+            echo "> 这是**非官方构建**（个人 fork），已回退上游「在中国大陆地区禁用游戏下载功能」的改动，未使用 HMCL 官方签名。"
+            echo "> 请不要就本构建的问题向 HMCL 官方反馈。"
+            echo ""
+            echo "- 构建提交：\`${GITHUB_SHA}\`"
+            echo "- 构建时间：\`$(date -u '+%Y-%m-%d %H:%M:%S UTC')\`"
+            echo ""
+            echo "| 文件 | SHA-256 |"
+            echo "| --- | --- |"
+            for ext in exe jar sh deb; do
+              echo "| [HMCL-${version}.${ext}](https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.version.outputs.tag }}/HMCL-${version}.${ext}) | \`$(sha256 "${ext}")\` |"
+            done
+            echo ""
+            echo "<details>"
+            echo "<summary>校验方法</summary>"
+            echo ""
+            echo '```bash'
+            echo "sha256sum -c HMCL-${version}.jar.sha256"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } > RELEASE_NOTE
+
+          echo "RELEASE_NOTE:"
+          cat RELEASE_NOTE
+
+      - name: Publish release
+        if: ${{ github.event_name == 'push' || inputs.release }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install git-cnb
-        if: ${{ env.continue == 'true' }}
-        run: go install "cnb.cool/looc/git-cnb@$GIT_CNB_VERSION"
-        env:
-          GIT_CNB_VERSION: '1.1.2'
-      - name: Create CNB release
-        if: ${{ env.continue == 'true' }}
         run: |
-          echo "Uploading tags to CNB"
-          git fetch --tags
-          git push "https://cnb:${{ secrets.CNB_SYNC_TOKEN }}@cnb.cool/$CNB_REPO.git" "$HMCL_TAG_NAME"
-          
-          echo "Creating CNB release"
-          ~/go/bin/git-cnb release create \
-             --repo "$CNB_REPO" \
-             --tag "$HMCL_TAG_NAME" \
-             --name "HMCL $HMCL_VERSION" \
-             --body "$(cat CNB_RELEASE_NOTE)" \
-             --prerelease true
+          set -euo pipefail
 
-           echo "Uploading HMCL-$HMCL_VERSION.jar"
-           ~/go/bin/git-cnb release asset-upload --repo="$CNB_REPO" --tag-name "$HMCL_TAG_NAME" --file-name "HMCL-$HMCL_VERSION.jar"
+          version="${{ steps.version.outputs.version }}"
+          tag="${{ steps.version.outputs.tag }}"
+          dir="HMCL/build/libs"
 
-           echo "Uploading HMCL-$HMCL_VERSION.exe"
-           ~/go/bin/git-cnb release asset-upload --repo="$CNB_REPO" --tag-name "$HMCL_TAG_NAME" --file-name "HMCL-$HMCL_VERSION.exe"
+          assets=()
+          for ext in exe jar sh deb; do
+            assets+=("${dir}/HMCL-${version}.${ext}")
+            assets+=("${dir}/HMCL-${version}.${ext}.sha256")
+          done
 
-           echo "Uploading HMCL-$HMCL_VERSION.sh"
-           ~/go/bin/git-cnb release asset-upload --repo="$CNB_REPO" --tag-name "$HMCL_TAG_NAME" --file-name "HMCL-$HMCL_VERSION.sh"
-          
-          echo "Uploading HMCL-$HMCL_VERSION.deb"
-           ~/go/bin/git-cnb release asset-upload --repo="$CNB_REPO" --tag-name "$HMCL_TAG_NAME" --file-name "HMCL-$HMCL_VERSION.deb"
-        env:
-          CNB_TOKEN: ${{ secrets.CNB_SYNC_TOKEN }}
-          CNB_REPO: HMCL-dev/HMCL
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists, updating assets and notes"
+            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release edit "$tag" --notes-file RELEASE_NOTE
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --target "${GITHUB_SHA}" \
+              --title "HMCL ${version} (unofficial fork)" \
+              --notes-file RELEASE_NOTE \
+              --prerelease
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### HMCL ${{ steps.version.outputs.version }}"
+            echo ""
+            echo "- 提交: \`${GITHUB_SHA}\`"
+            echo "- Artifact: \`HMCL-${{ steps.version.outputs.version }}\`"
+            if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.release }}" = "true" ]; then
+              echo "- Release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${{ steps.version.outputs.tag }}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
