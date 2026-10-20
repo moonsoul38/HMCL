@@ -80,7 +80,6 @@ jobs:
           name: HMCL-${{ steps.version.outputs.version }}
           path: HMCL/build/libs/HMCL-*
           if-no-files-found: error
-          archive: false
 
       - name: Generate release note
         if: ${{ github.event_name == 'push' || inputs.release }}
@@ -112,7 +111,8 @@ jobs:
             echo "<summary>校验方法</summary>"
             echo ""
             echo '```bash'
-            echo "sha256sum -c HMCL-${version}.jar.sha256"
+            echo "sha256sum HMCL-${version}.jar"
+            echo "cat HMCL-${version}.jar.sha256"
             echo '```'
             echo ""
             echo "</details>"
