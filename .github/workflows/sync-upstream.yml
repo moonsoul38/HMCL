@@ -1,0 +1,169 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # 每周一 03:00 UTC（北京时间 11:00）
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只试合并，不推送"
+        type: boolean
+        default: false
+      build:
+        description: "同步成功后触发 Build & Release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: ${{ github.repository_owner != 'HMCL-dev' }}
+    runs-on: ubuntu-latest
+    env:
+      TARGET_BRANCH: dev
+      UPSTREAM_REPO: HMCL-dev/HMCL
+      UPSTREAM_BRANCH: main
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync upstream
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -uo pipefail
+
+          report_problem() {
+            local reason="$1"
+            local body="/tmp/sync-failure.md"
+
+            {
+              printf '%s\n\n' "$reason"
+              printf '手动处理步骤：\n\n```bash\n'
+              printf 'git fetch origin\n'
+              printf 'git switch %s\n' "$TARGET_BRANCH"
+              printf 'git pull --ff-only\n'
+              printf 'git fetch https://github.com/%s.git %s\n' "$UPSTREAM_REPO" "$UPSTREAM_BRANCH"
+              printf 'git merge FETCH_HEAD\n'
+              printf '# 解决冲突后\ngit push origin %s\n```\n\n' "$TARGET_BRANCH"
+              printf '处理时请保持对 `583e004d7` / `8827fd06d` 的回退，不要让 `RegionUtils` 或 `download.china` 重新出现。\n\n'
+              printf '运行记录：%s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            } > "$body"
+
+            local existing
+            existing="$(gh issue list --state open --search '上游同步失败 in:title' \
+              --json number --jq '.[0].number // empty' 2>/dev/null)"
+
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body-file "$body"
+            else
+              gh issue create --title "上游同步失败：需要手动处理" --body-file "$body"
+            fi
+          }
+
+          echo "目标分支: $TARGET_BRANCH"
+          echo "上游仓库: $UPSTREAM_REPO/$UPSTREAM_BRANCH"
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          if ! git fetch --no-tags upstream "$UPSTREAM_BRANCH"; then
+            report_problem "拉取上游仓库失败，请检查网络或上游地址。"
+            exit 1
+          fi
+
+          UPSTREAM_SHA="$(git rev-parse FETCH_HEAD)"
+          SHORT_SHA="${UPSTREAM_SHA:0:7}"
+          echo "upstream_sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "上游提交: ${UPSTREAM_SHA}"
+
+          if git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
+            echo "已是最新，无需同步"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          COUNT="$(git rev-list --count "HEAD..${UPSTREAM_SHA}")"
+          echo "上游有 ${COUNT} 个新提交："
+          git log --oneline "HEAD..${UPSTREAM_SHA}" | head -20
+
+          if ! git merge --no-ff --no-commit "$UPSTREAM_SHA"; then
+            git merge --abort 2>/dev/null || true
+            report_problem "上游 \`${UPSTREAM_REPO}@${SHORT_SHA}\` 合并到 \`${TARGET_BRANCH}\` 时发生冲突，本次没有推送任何内容。"
+            exit 1
+          fi
+
+          # 上游可能重新加入地区限制，发现后立即放弃本次合并，等待人工处理
+          restriction=""
+          if [ -f HMCL/src/main/java/org/jackhuang/hmcl/util/RegionUtils.java ]; then
+            restriction="RegionUtils.java"
+          elif grep -rq "RegionUtils" HMCL/src/main HMCLCore/src/main 2>/dev/null; then
+            restriction="RegionUtils 引用"
+          elif grep -rq "download\.china" HMCL/src/main/resources/assets/lang 2>/dev/null; then
+            restriction="download.china 文案"
+          fi
+
+          if [ -n "$restriction" ]; then
+            git merge --abort 2>/dev/null || true
+            report_problem "合并后检测到地区限制相关代码（${restriction}），已放弃本次合并，避免把限制带进 \`${TARGET_BRANCH}\`。"
+            exit 1
+          fi
+
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            git diff --cached --stat | tail -20
+            git merge --abort 2>/dev/null || true
+            echo "dry run 完成，未推送"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 保留本 fork 自己的 CI 配置，不采用上游对 .github/workflows 的修改
+          git reset -q HEAD -- .github/workflows 2>/dev/null || true
+          git checkout -- .github/workflows 2>/dev/null || true
+          git clean -fdq -- .github/workflows 2>/dev/null || true
+
+          git commit -m "chore: 同步上游 ${UPSTREAM_REPO}@${SHORT_SHA}"
+
+          if ! git push origin "HEAD:${TARGET_BRANCH}"; then
+            report_problem "上游合并成功，但推送到 \`${TARGET_BRANCH}\` 失败，可能是分支保护或 token 权限不足。"
+            exit 1
+          fi
+
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "已推送 ${TARGET_BRANCH}："
+          git log --oneline -5
+
+      - name: Trigger build
+        if: ${{ inputs.build && steps.sync.outputs.pushed == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release.yml --ref "$TARGET_BRANCH" -f release=true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### 上游同步"
+            echo ""
+            echo "- 上游仓库: \`${{ env.UPSTREAM_REPO }}\`"
+            echo "- 上游提交: \`${{ steps.sync.outputs.upstream_sha }}\`"
+            echo "- 是否推送: \`${{ steps.sync.outputs.pushed }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
