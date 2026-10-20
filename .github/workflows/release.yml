@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   check-update:
-    if: ${{ github.repository_owner == 'HMCL-dev' }}
+    if: ${{ github.repository_owner == 'moonsoul38' }}
     strategy:
       fail-fast: false
       max-parallel: 1
