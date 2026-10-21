@@ -7,6 +7,10 @@ on:
         description: "构建完成后创建 GitHub Release（取消勾选则只上传 Actions Artifact）"
         type: boolean
         default: true
+      prerelease:
+        description: "发布为 Pre-release（每周自动构建会勾选；手动发布正式版请保持取消）"
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -83,6 +87,8 @@ jobs:
 
       - name: Generate release note
         if: ${{ github.event_name == 'push' || inputs.release }}
+        env:
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
 
@@ -100,6 +106,11 @@ jobs:
             echo ""
             echo "- 构建提交：\`${GITHUB_SHA}\`"
             echo "- 构建时间：\`$(date -u '+%Y-%m-%d %H:%M:%S UTC')\`"
+            if [ "${PRERELEASE:-false}" = "true" ]; then
+              echo "- 发布类型：**Pre-release（预发布）**"
+            else
+              echo "- 发布类型：**正式发布**"
+            fi
             echo ""
             echo "| 文件 | SHA-256 |"
             echo "| --- | --- |"
@@ -125,12 +136,14 @@ jobs:
         if: ${{ github.event_name == 'push' || inputs.release }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
 
           version="${{ steps.version.outputs.version }}"
           tag="${{ steps.version.outputs.tag }}"
           dir="HMCL/build/libs"
+          is_prerelease="${PRERELEASE:-false}"
 
           assets=()
           for ext in exe jar sh deb; do
@@ -138,16 +151,30 @@ jobs:
             assets+=("${dir}/HMCL-${version}.${ext}.sha256")
           done
 
-          if gh release view "$tag" >/dev/null 2>&1; then
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release ${tag} already exists, updating assets and notes"
-            gh release upload "$tag" "${assets[@]}" --clobber
-            gh release edit "$tag" --notes-file RELEASE_NOTE
+            gh release upload "$tag" "${assets[@]}" -R "$GITHUB_REPOSITORY" --clobber
+            if [ "$is_prerelease" = "true" ]; then
+              gh release edit "$tag" -R "$GITHUB_REPOSITORY" \
+                --notes-file RELEASE_NOTE --prerelease --latest=false
+            else
+              gh release edit "$tag" -R "$GITHUB_REPOSITORY" \
+                --notes-file RELEASE_NOTE --prerelease=false --latest
+            fi
           else
-            gh release create "$tag" "${assets[@]}" \
-              --target "${GITHUB_SHA}" \
-              --title "HMCL ${version} (unofficial fork)" \
-              --notes-file RELEASE_NOTE \
-              --prerelease
+            if [ "$is_prerelease" = "true" ]; then
+              gh release create "$tag" "${assets[@]}" -R "$GITHUB_REPOSITORY" \
+                --target "${GITHUB_SHA}" \
+                --title "HMCL ${version} (unofficial fork)" \
+                --notes-file RELEASE_NOTE \
+                --prerelease
+            else
+              gh release create "$tag" "${assets[@]}" -R "$GITHUB_REPOSITORY" \
+                --target "${GITHUB_SHA}" \
+                --title "HMCL ${version} (unofficial fork)" \
+                --notes-file RELEASE_NOTE \
+                --latest
+            fi
           fi
 
       - name: Summary
@@ -157,6 +184,11 @@ jobs:
             echo ""
             echo "- 提交: \`${GITHUB_SHA}\`"
             echo "- Artifact: \`HMCL-${{ steps.version.outputs.version }}\`"
+            if [ "${{ inputs.prerelease }}" = "true" ]; then
+              echo "- 发布类型: Pre-release"
+            else
+              echo "- 发布类型: 正式发布"
+            fi
             if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.release }}" = "true" ]; then
               echo "- Release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${{ steps.version.outputs.tag }}"
             fi

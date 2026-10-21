@@ -10,8 +10,12 @@ on:
         description: "只试合并，不推送"
         type: boolean
         default: false
+      update_default:
+        description: "同步后把默认分支快进到 dev（当前默认分支为 fuck_stupid_chinese_parents）"
+        type: boolean
+        default: true
       build:
-        description: "同步成功后触发 Build & Release"
+        description: "同步成功后触发 Build & Release（手动触发为正式发布）"
         type: boolean
         default: false
 
@@ -71,13 +75,13 @@ jobs:
             } > "$body"
 
             local existing
-            existing="$(gh issue list --state open --search '上游同步失败 in:title' \
+            existing="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search '上游同步失败 in:title' \
               --json number --jq '.[0].number // empty' 2>/dev/null)"
 
             if [ -n "$existing" ]; then
-              gh issue comment "$existing" --body-file "$body"
+              gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body-file "$body"
             else
-              gh issue create --title "上游同步失败：需要手动处理" --body-file "$body"
+              gh issue create -R "$GITHUB_REPOSITORY" --title "上游同步失败：需要手动处理" --body-file "$body"
             fi
           }
 
@@ -151,11 +155,32 @@ jobs:
           echo "已推送 ${TARGET_BRANCH}："
           git log --oneline -5
 
+      - name: Update default branch
+        if: ${{ steps.sync.outputs.pushed == 'true' && (github.event_name == 'schedule' || inputs.update_default) }}
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          echo "默认分支: $DEFAULT_BRANCH"
+          git fetch origin "$DEFAULT_BRANCH"
+
+          if ! git merge-base --is-ancestor "origin/${DEFAULT_BRANCH}" HEAD; then
+            echo "::warning::${DEFAULT_BRANCH} 不是 dev 的祖先，跳过快进"
+            exit 0
+          fi
+
+          git push origin "HEAD:${DEFAULT_BRANCH}"
+          echo "已把 ${DEFAULT_BRANCH} 快进到 dev"
+
       - name: Trigger build
-        if: ${{ inputs.build && steps.sync.outputs.pushed == 'true' }}
+        if: ${{ steps.sync.outputs.pushed == 'true' && (github.event_name == 'schedule' || inputs.build) }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run release.yml --ref "$TARGET_BRANCH" -f release=true
+          PRERELEASE: ${{ github.event_name == 'schedule' }}
+        run: |
+          gh workflow run release.yml -R "$GITHUB_REPOSITORY" --ref "$TARGET_BRANCH" \
+            -f release=true -f prerelease="${PRERELEASE}"
 
       - name: Summary
         if: always()
@@ -166,4 +191,5 @@ jobs:
             echo "- 上游仓库: \`${{ env.UPSTREAM_REPO }}\`"
             echo "- 上游提交: \`${{ steps.sync.outputs.upstream_sha }}\`"
             echo "- 是否推送: \`${{ steps.sync.outputs.pushed }}\`"
+            echo "- 默认分支: \`${{ github.event.repository.default_branch }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
